@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use reims_vgpu::{IoSurfaceDevice, IoSurfaceDeviceConfig, RaiseInterrupt};
 
-use crate::device::{RvgMemoryMap, memory_map};
+use crate::device::{RvgMemoryMap, RvgMemoryRangeFile, memory_map};
 use crate::ffi;
 use crate::handle;
 use crate::sized::{self, HostStruct};
@@ -58,12 +58,19 @@ pub struct RvgIOSurfaceDeviceConfig {
     /// the ring count these pages; give it the graphics device's. Any other value is
     /// RVG_ERR_INVALID_ARGUMENT.
     pub guest_page_shift: u32,
+    /// vphone-linux: with `memory_map`, `memory_map->range_count` entries, the i-th naming the
+    /// file behind range i (fd -1 for none), exactly as `RvgDeviceConfig::memory_files`. On Linux
+    /// the library builds its shared views of guest pages from these files; without them the
+    /// IOSurface device cannot map the guest's descriptor table or ring (a black display). NULL
+    /// is every range fileless, the pre-vphone behaviour. Ignored on macOS.
+    pub memory_files: *const RvgMemoryRangeFile,
 }
 
 // SAFETY: repr(C), a u32 first; pointers and an integer.
 unsafe impl HostStruct for RvgIOSurfaceDeviceConfig {
     /// The first version ends at `callbacks`: a host built against it passes 24, and gets the
-    /// library's own architecture's pages (`guest_page_shift` 0).
+    /// library's own architecture's pages (`guest_page_shift` 0). The second ends at
+    /// `guest_page_shift` (32): a host built against it passes 32 and gets fileless ranges.
     const V1_SIZE: usize = 24;
 }
 
@@ -71,7 +78,8 @@ const _: () = assert!(
     std::mem::offset_of!(RvgIOSurfaceDeviceConfig, guest_page_shift)
         == RvgIOSurfaceDeviceConfig::V1_SIZE
 );
-const _: () = assert!(size_of::<RvgIOSurfaceDeviceConfig>() == 32);
+const _: () = assert!(std::mem::offset_of!(RvgIOSurfaceDeviceConfig, memory_files) == 32);
+const _: () = assert!(size_of::<RvgIOSurfaceDeviceConfig>() == 40);
 
 /// The IOSurface device: vmapple's second MMIO region.
 pub struct RvgIOSurfaceDevice {
@@ -123,8 +131,10 @@ pub unsafe extern "C" fn rvg_iosurface_device_create(
         if device.is_null() {
             return refuse(RVG_ERR_INVALID_ARGUMENT);
         }
-        // SAFETY: the config's contract: NULL or a live map.
-        let memory_map = match unsafe { memory_map(c.memory_map, std::ptr::null()) } {
+        // SAFETY: the config's contract: NULL or a live map, and NULL or its files (one per
+        // range). vphone-linux: the files let the library build shared memfd views on Linux so
+        // the IOSurface device can map the guest's descriptor table and ring.
+        let memory_map = match unsafe { memory_map(c.memory_map, c.memory_files) } {
             Ok(m) => m,
             Err(s) => return refuse(s),
         };

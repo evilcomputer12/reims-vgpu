@@ -9,7 +9,7 @@
 use std::ffi::c_void;
 use std::mem::MaybeUninit;
 use std::num::NonZeroU64;
-use std::os::fd::{FromRawFd, OwnedFd};
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::sync::Arc;
 
 use reims_vgpu::{
@@ -419,18 +419,124 @@ pub(crate) unsafe fn memory_map(
             },
             _ => None,
         };
+        // vphone-linux (AMD/RADV isolated tasks): QEMU maps the guest-RAM memfd at only host-page
+        // (4 KiB) alignment, but an isolated task's whole_pages() needs the host address aligned to
+        // the 16 KiB guest page. When the range has its memfd, map it ourselves at a 2 MiB-aligned
+        // address (the same shared bytes) and use that; CPU reads and dma-bufs both resolve
+        // guest-physical to the same memfd, so it stays consistent.
+        let host = match &file {
+            Some(mf) => {
+                let a = unsafe {
+                    aligned_shared_map(mf.fd.as_raw_fd(), mf.offset, r.physical_length)
+                };
+                if a.is_null() {
+                    log::warn!("vphone-diag: aligned remap failed for range {i}; using QEMU address");
+                    r.host_address.cast()
+                } else {
+                    a.cast()
+                }
+            }
+            None => r.host_address.cast(),
+        };
         // SAFETY: the header's contract on `host_address`: mapped while any device made over
         // the map lives, and, with a file, a shared mapping of it from `offset`.
         unsafe {
-            m.push_with_file(
-                r.physical_address,
-                r.physical_length,
-                r.host_address.cast(),
-                file,
-            );
+            m.push_with_file(r.physical_address, r.physical_length, host, file);
         }
     }
     Ok(Some(m))
+}
+
+/// Map `length` bytes of the memfd `fd` from `offset` as `MAP_SHARED` at a 2 MiB-aligned host
+/// address, returning it (leaked for the process, as the guest RAM is), or NULL on failure (the
+/// caller then keeps QEMU's address). Reserves `length + 2 MiB` with `PROT_NONE`, places the
+/// shared mapping on the aligned boundary with `MAP_FIXED`, and trims the slack. The bytes are
+/// the same shared memfd QEMU maps; only the host address differs (aligned to the guest page).
+/// Memo of [`aligned_shared_map`], keyed by the backing file's identity (its device and inode,
+/// read with `fstat`) and the `offset` and `length` mapped. The graphics device and the MMIO
+/// IOSurface device each build a memory map over the same guest-RAM memfd; without this they
+/// would each make their own aligned mapping at a different host address, and only the one the
+/// device leases (`platform::vulkan::guest_memory` -> `lease_guest_memory`) would be registered
+/// for the remaps the IOSurface display path makes, so its ring and descriptor table could not
+/// be mapped (a black display). Memoised, both maps share one registered mapping.
+static ALIGNED_MAPS: parking_lot::Mutex<std::collections::BTreeMap<(u64, u64, u64, u64), usize>> =
+    parking_lot::Mutex::new(std::collections::BTreeMap::new());
+
+unsafe fn aligned_shared_map(fd: i32, offset: u64, length: u64) -> *mut core::ffi::c_void {
+    const ALIGN: u64 = 0x20_0000; // 2 MiB
+    let Ok(len) = usize::try_from(length) else {
+        return std::ptr::null_mut();
+    };
+    // The same memfd + offset + length maps once, shared by every device over it.
+    let key = {
+        // SAFETY: `fd` is a live file descriptor for the duration of this call.
+        let mut st: libc::stat = unsafe { std::mem::zeroed() };
+        if unsafe { libc::fstat(fd, &mut st) } == 0 {
+            Some((st.st_dev as u64, st.st_ino as u64, offset, length))
+        } else {
+            None
+        }
+    };
+    if let Some(key) = key {
+        if let Some(&addr) = ALIGNED_MAPS.lock().get(&key) {
+            return addr as *mut core::ffi::c_void;
+        }
+    }
+    let Some(want_u) = length.checked_add(ALIGN) else {
+        return std::ptr::null_mut();
+    };
+    let Ok(want) = usize::try_from(want_u) else {
+        return std::ptr::null_mut();
+    };
+    // SAFETY: a fresh anonymous reservation; NULL hint lets the kernel choose.
+    let base = unsafe {
+        libc::mmap(
+            std::ptr::null_mut(),
+            want,
+            libc::PROT_NONE,
+            libc::MAP_PRIVATE | libc::MAP_ANONYMOUS | libc::MAP_NORESERVE,
+            -1,
+            0,
+        )
+    };
+    if base == libc::MAP_FAILED {
+        return std::ptr::null_mut();
+    }
+    let base_u = base as u64;
+    let aligned = base_u.wrapping_add(ALIGN - 1) & !(ALIGN - 1);
+    // SAFETY: MAP_FIXED over our own reservation; offset is page-aligned (checked in file_refusal).
+    let mapped = unsafe {
+        libc::mmap(
+            aligned as *mut libc::c_void,
+            len,
+            libc::PROT_READ | libc::PROT_WRITE,
+            libc::MAP_SHARED | libc::MAP_FIXED,
+            fd,
+            offset as libc::off_t,
+        )
+    };
+    if mapped == libc::MAP_FAILED {
+        // SAFETY: unmap the whole reservation we made.
+        unsafe { libc::munmap(base, want) };
+        return std::ptr::null_mut();
+    }
+    // Trim the reservation slack outside [aligned, aligned + length).
+    let head = aligned - base_u;
+    if head > 0 {
+        // SAFETY: the head is still our PROT_NONE reservation.
+        unsafe { libc::munmap(base, head as usize) };
+    }
+    let tail_start = aligned + length;
+    let tail_len = base_u + want_u - tail_start;
+    if tail_len > 0 {
+        // SAFETY: the tail is still our PROT_NONE reservation.
+        unsafe { libc::munmap(tail_start as *mut libc::c_void, tail_len as usize) };
+    }
+    // Share this mapping with the next device over the same memfd + offset + length.
+    if let Some(key) = key {
+        ALIGNED_MAPS.lock().insert(key, mapped as usize);
+    }
+    mapped
 }
 
 /// Why the file entry `f` of range `r` is refused, as the end of a log line, or `None`: an `fd`

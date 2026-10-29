@@ -798,6 +798,12 @@ typedef struct {
   // the ring count these pages; give it the graphics device's. Any other value is
   // RVG_ERR_INVALID_ARGUMENT.
   uint32_t guest_page_shift;
+  // vphone-linux: with `memory_map`, `memory_map->range_count` entries, the i-th naming the
+  // file behind range i (fd -1 for none), exactly as `RvgDeviceConfig::memory_files`. On Linux
+  // the library builds its shared views of guest pages from these files; without them the
+  // IOSurface device cannot map the guest's descriptor table or ring (a black display). NULL
+  // is every range fileless, the pre-vphone behaviour. Ignored on macOS.
+  const RvgMemoryRangeFile *memory_files;
 } RvgIOSurfaceDeviceConfig;
 
 // `send_to_guest(ctx, message, length)`: one host-to-guest message, the whole container, which
