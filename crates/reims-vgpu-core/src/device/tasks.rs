@@ -69,8 +69,11 @@ impl Isolation {
 /// The task table's size: task ids are below 256.
 pub const MAX_TASKS: u32 = 256;
 
-/// The largest local task (32 GiB).
-pub const MAX_LOCAL_TASK_LENGTH: u64 = 0x8_0000_0000;
+/// The largest local task (1 TiB). iOS's AppleParavirtGPU asks for a 256 GiB VA per GPU task
+/// (macOS guests fit the old 32 GiB cap; iOS does not), and the task's host reservation is
+/// MAP_NORESERVE (sparse), so a generous cap costs no RAM until pages are touched. The page
+/// table depth is the guest's (1-3; depth 3 covers 128 TiB), checked in gpu_task/handshake.rs.
+pub const MAX_LOCAL_TASK_LENGTH: u64 = 0x100_0000_0000;
 
 /// A task's root word written through a missing root node (never reached: the root node is
 /// checked first).
@@ -357,7 +360,7 @@ mod tests {
             assert!(t.device.tasks.lock().is_empty());
         }
 
-        /// a local task above 32 GiB throws and writes no word
+        /// a local task above the cap throws and writes no word
         #[test]
         fn local_too_large_throws() {
             let t = device(Opts::default()).with_root_node();
@@ -369,7 +372,7 @@ mod tests {
                 ),
                 (
                     DeviceRaise::TaskTooLarge,
-                    "local task 0 of 0x800000001 bytes is larger than 0x800000000".into()
+                    "local task 0 of 0x10000000001 bytes is larger than 0x10000000000".into()
                 )
             );
             assert!(t.device.tasks.lock().is_empty());
