@@ -1201,6 +1201,15 @@ uint64_t rvg_iosurface_device_mmio_read(RvgIOSurfaceDevice *device, uint64_t off
 // `device` is a live IOSurface device handle.
 void rvg_iosurface_device_mmio_write(RvgIOSurfaceDevice *device, uint64_t offset, uint64_t value);
 
+// vphone-linux: re-create the IOSurfaces the descriptor table still describes, after a resume.
+// The `Map` ring commands that first created them were consumed before the suspend, so on a
+// fresh device the host calls this once, after setting the descriptor base, to rebuild them
+// from the (restored) guest memory. May block on the IOSurface device's thread.
+//
+// # Safety
+// `device` is a live IOSurface device handle.
+void rvg_iosurface_device_rebuild_surfaces(RvgIOSurfaceDevice *device);
+
 // Tells the device the guest wrote `dirty`, inside a range add_trace_range watches. Any thread,
 // except inside add_trace_range. NULL does nothing.
 //

@@ -134,6 +134,20 @@ impl<P: Platform> HostDeviceCore<P> {
         }
     }
 
+    /// After a resume, the descriptor table is mapped again but the surface slots are empty: the
+    /// `Map` ring commands that filled them were consumed before the snapshot, so the guest never
+    /// re-sends them. Re-create every surface whose descriptor the table still holds in the
+    /// (restored) guest memory, as [`Self::map`] does for a `Map` command, so the guest's tasks
+    /// find their IOSurfaces again. A mapping id with no descriptor there fails the map harmlessly
+    /// (`BadArgument`). The host calls this once on resume, after the descriptor base is set.
+    pub fn rebuild_surfaces(&self) {
+        self.on_queue(|this, st| {
+            for id in 1..MAPPING_ID_COUNT {
+                let _ = this.map(st, id as u32);
+            }
+        });
+    }
+
     /// The features [`REG_FEATURES`] reads: bit 0, the second descriptor form, only where it
     /// leaves no mapping id without a descriptor ([`second_form_holds_every_id`]).
     pub(super) fn features_offered(&self) -> u64 {

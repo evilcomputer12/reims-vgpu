@@ -133,6 +133,13 @@ impl<P: Platform> IoSurfaceDevice<P> {
             self.inner.mmio_write(offset, value);
         });
     }
+
+    /// Re-create the IOSurfaces the descriptor table still describes, after a resume.
+    pub fn rebuild_surfaces(&self) {
+        entry::run(|_| {
+            self.inner.rebuild_surfaces();
+        });
+    }
 }
 
 #[cfg(test)]

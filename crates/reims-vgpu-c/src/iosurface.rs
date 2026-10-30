@@ -215,5 +215,22 @@ pub unsafe extern "C" fn rvg_iosurface_device_mmio_write(
     })
 }
 
+/// vphone-linux: re-create the IOSurfaces the descriptor table still describes, after a resume.
+/// The `Map` ring commands that first created them were consumed before the suspend, so on a
+/// fresh device the host calls this once, after setting the descriptor base, to rebuild them
+/// from the (restored) guest memory. May block on the IOSurface device's thread.
+///
+/// # Safety
+/// `device` is a live IOSurface device handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rvg_iosurface_device_rebuild_surfaces(device: *mut RvgIOSurfaceDevice) {
+    ffi::export(|| {
+        // SAFETY: the caller's contract.
+        unsafe { live(device, "rvg_iosurface_device_rebuild_surfaces") }
+            .device
+            .rebuild_surfaces();
+    })
+}
+
 #[cfg(test)]
 mod tests;
